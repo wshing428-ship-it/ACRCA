@@ -128,7 +128,7 @@ input[type=range]{flex:1;min-width:120px;accent-color:var(--signal)}
         <div class="row"><label>参与者 <select id="recWho"></select></label><span class="hint" id="recK"></span></div>
         <div class="row" id="sensorRow"></div>
         <div class="row"><button class="b primary big" id="btnStart">开始记录</button></div>
-        <p class="hint">开始后先在起点锚点扫码（或手动选锚点）确定位置和朝向。手机竖着拿在胸前，屏幕朝上或朝前都可以，顶端指向你走的方向。屏幕要一直亮着，不要锁屏或切到别的 App。</p>
+        <p class="hint">开始后点“手动定位”：在地图上点你站的位置，再点你面朝的方向（贴了二维码的话扫码更准）。手机竖着拿在胸前，屏幕朝上或朝前都可以，顶端指向你走的方向。屏幕要一直亮着，不要锁屏或切到别的 App。</p>
         <details class="card" id="simBox">
           <summary><b>演示模式</b>（没有手机传感器也能看效果）</summary>
           <p class="hint">在地图上点几个路径点作为“真实路线”，然后开始。演示会故意加入方向漂移和步长误差，看墙体约束和锚点怎么把它拉回来。路径点落在锚点上时，会当作在那里扫了码。</p>
@@ -138,9 +138,9 @@ input[type=range]{flex:1;min-width:120px;accent-color:var(--signal)}
       </div>
       <div id="recLive" hidden>
         <div class="stats" id="liveStats"></div>
-        <div class="row" style="margin-top:10px"><button class="b primary" id="btnScan">扫码校正</button><button class="b" id="btnPick">手动选锚点</button><button class="b danger" id="btnEnd">结束</button></div>
+        <div class="row" style="margin-top:10px"><button class="b" id="btnScan">扫码校正</button><button class="b primary" id="btnPick">手动定位</button><button class="b danger" id="btnEnd">结束</button></div>
         <div class="card" id="pickBar" hidden>
-          <div id="pickMsg">在地图上点你旁边的锚点。</div>
+          <div id="pickMsg">在地图上点你现在站的位置。</div>
           <div class="row"><button class="b primary" id="pickOk" disabled>确认在此</button><button class="b" id="pickCancel">取消</button></div>
         </div>
         <p class="hint" id="liveHint"></p>

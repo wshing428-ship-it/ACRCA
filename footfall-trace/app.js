@@ -233,6 +233,7 @@ function polyline(pts, color, w, dash) {
   ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y); for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y); ctx.stroke(); ctx.setLineDash([]);
 }
 function drawLive() {
+  if (pickMode && pickTarget && pickTarget.custom) { const t = pickTarget; ctx.fillStyle = css('--signal'); ctx.beginPath(); ctx.arc(t.x, t.y, px(7), 0, 7); ctx.fill(); if (t.face != null) { const h = rad(t.face); ctx.strokeStyle = css('--signal'); ctx.lineWidth = px(3); ctx.beginPath(); ctx.moveTo(t.x, t.y); ctx.lineTo(t.x + Math.sin(h) * px(40), t.y - Math.cos(h) * px(40)); ctx.stroke(); } }
   if (simTruth.length) polyline(simTruth, css('--muted'), 1.2, [px(3), px(4)]);
   if (!live) return;
   if (live.path.length) {
@@ -298,7 +299,19 @@ function onTap(x, y) {
       refreshAnchorEd(); draw();
     }
   } else if (tab === 'rec') {
-    if (live && pickMode) { const a = anchorNear(x, y, 3); pickTarget = a; $('#pickOk').disabled = !a; $('#pickMsg').textContent = a ? `面朝 ${a.id}${a.label ? '（' + a.label + '）' : ''} 的二维码站好，再点“确认在此”。` : '附近没有锚点，点近一点。'; draw(); }
+    if (live && pickMode) {
+      if (pickTarget && pickTarget.custom && pickTarget.face == null) {
+        if (Math.hypot(x - pickTarget.x, y - pickTarget.y) < 0.3) return;
+        pickTarget.face = n360(deg(Math.atan2(x - pickTarget.x, -(y - pickTarget.y)))); $('#pickOk').disabled = false;
+        $('#pickMsg').textContent = '按箭头方向站好，手机顶端朝前，然后点“确认在此”。';
+      } else {
+        const a = anchorNear(x, y, 1.0);
+        if (a) { pickTarget = a; $('#pickOk').disabled = false; $('#pickMsg').textContent = `面朝 ${a.id}${a.label ? '（' + a.label + '）' : ''} 的二维码站好，再点“确认在此”。`; }
+        else if (isWallAt(x, y)) { toast('这里是墙，点在可以站的地方'); return; }
+        else { pickTarget = { id: '手动', label: '', x: +x.toFixed(2), y: +y.toFixed(2), face: null, type: 'normal', custom: true }; $('#pickOk').disabled = true; $('#pickMsg').textContent = '再点一下你面朝的方向（往前几米的地方）。'; }
+      }
+      draw();
+    }
     else if (!live) { simPts.push([x, y]); simTruth = []; draw(); }
   }
 }
@@ -440,12 +453,11 @@ function newSession(sim) {
 }
 async function startRecording() {
   if (!floor) return toast('先在地图设置里准备平面图');
-  if (!floor.anchors.length) return toast('这张地图还没有锚点，先在地图设置里放锚点');
   try { await Sensors.start(); } catch (err) { return toast(err.message, 6000); }
   Sensors.sim = false; keepAwake();
   live = newSession(false); liveState = 'needsAnchor'; tracker.constrain = true; simTruth = [];
   Sensors.onStep = s => onStep(s);
-  showLive(); updateLive(); draw();
+  showLive(); $('#btnPick').click(); updateLive(); draw();
 }
 function onStep({ amp, yaw }) {
   if (!live || liveState !== 'tracking' || yaw == null) return;
@@ -468,7 +480,7 @@ function fixAnchor(a, align, yawAtScan) {
   live.path.push({ t, x: a.x, y: a.y, sd: 0.3, anchor: a.id });
   tracker.init(a.x, a.y, 0.3); liveState = 'tracking';
   DB.put('sessions', live).catch(() => { });
-  if (!Sensors.sim) toast(wasTracking ? `已在 ${a.id} 校正（偏差 ${live.anchors.at(-1).err} m）` : `从 ${a.id} 开始，走吧`);
+  if (!Sensors.sim) toast(wasTracking ? `已在 ${a.id} 校正（偏差 ${live.anchors.at(-1).err} m）` : `开始了，正常走吧`);
   if (a.type === 'exit' && wasTracking) { endRecording('出口'); return; }
   updateLive(); draw();
 }
@@ -495,8 +507,8 @@ function updateLive() {
     ['上次校正', last ? dur(since) + ' 前' : '—']
   ].map(([a, b]) => `<div><span>${a}</span><b>${b}</b></div>`).join('');
   let hint = '';
-  if (liveState === 'needsAnchor') hint = '去最近的锚点扫码，确定起点。';
-  else if (spread > 2 || since > 120) hint = '误差在变大，路过锚点扫一下。';
+  if (liveState === 'needsAnchor') hint = '点“手动定位”，在地图上点你站的位置和面朝的方向；有二维码的话扫码更准。';
+  else if ((spread > 2 || since > 120) && floor.anchors.length) hint = '误差在变大，路过锚点扫一下。';
   else if (live.gaps.length) hint = `中途有 ${live.gaps.length} 段屏幕关闭，那段没有记录。`;
   $('#liveHint').textContent = hint;
 }
@@ -508,7 +520,7 @@ document.addEventListener('visibilitychange', () => {
 });
 $('#btnStart').onclick = startRecording;
 $('#btnEnd').onclick = () => endRecording('手动结束');
-$('#btnPick').onclick = () => { pickMode = true; pickTarget = null; $('#pickOk').disabled = true; $('#pickMsg').textContent = '在地图上点你旁边的锚点。'; showLive(); };
+$('#btnPick').onclick = () => { pickMode = true; pickTarget = null; $('#pickOk').disabled = true; $('#pickMsg').textContent = '在地图上点你现在站的位置（点在锚点上就用锚点）。'; showLive(); };
 $('#pickCancel').onclick = () => { pickMode = false; pickTarget = null; showLive(); draw(); };
 $('#pickOk').onclick = () => { if (pickTarget) fixAnchor(pickTarget, true); pickMode = false; pickTarget = null; showLive(); draw(); };
 $('#btnScan').onclick = () => openScanner(code => {
@@ -523,7 +535,7 @@ let scanStream = null, scanRAF = 0;
 async function openScanner(parse, done) {
   const ov = $('#scanOv'), vid = $('#scanVideo'); ov.hidden = false; $('#scanMsg').textContent = '扫码时人面对着码站好，不用很近。';
   try { scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 } }, audio: false }); }
-  catch { ov.hidden = true; return toast('打不开摄像头。可以用“手动选锚点”。', 4000); }
+  catch { ov.hidden = true; return toast('打不开摄像头。可以用“手动定位”。', 4000); }
   vid.srcObject = scanStream; await vid.play().catch(() => { });
   const c = document.createElement('canvas'); const x = c.getContext('2d', { willReadFrequently: true });
   const det = 'BarcodeDetector' in window ? new BarcodeDetector({ formats: ['qr_code'] }) : null;
