@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1">
+<title>步迹 Footfall Trace</title>
+<meta name="description" content="ACROSS RCA 室内走动轨迹记录：手机传感器步行推算 + 平面图墙体约束 + 二维码锚点校正">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#f1f0ec">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500&display=swap">
+<style>
+/* Layout: a survey instrument. Plan on top (or left on desktop), the operator's panel below with tabs. Same paper/ink/signal palette as the ACROSS RCA proposal site. */
+:root{
+  --paper:#f1f0ec; --sheet:#faf9f6; --ink:#191917; --ink-2:#45443f; --muted:#76746d; --hair:#cfccc4;
+  --signal:#e2501a; --ok:#2f7d55; --warn:#b7791f;
+  --f-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,"SFMono-Regular",Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--paper:#151513;--sheet:#1c1c1a;--ink:#ecebe6;--ink-2:#c3c1b9;--muted:#8f8d85;--hair:#36352f;--signal:#ff7a45;--ok:#5cc08a;--warn:#e0a84a;color-scheme:dark}}
+:root[data-theme="dark"]{--paper:#151513;--sheet:#1c1c1a;--ink:#ecebe6;--ink-2:#c3c1b9;--muted:#8f8d85;--hair:#36352f;--signal:#ff7a45;--ok:#5cc08a;--warn:#e0a84a;color-scheme:dark}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{height:100%;margin:0;background:var(--paper);color:var(--ink)}
+body{font-family:var(--f-body);font-size:14px;line-height:1.6;-webkit-font-smoothing:antialiased;display:flex;flex-direction:column;
+  padding-top:env(safe-area-inset-top,0px);overscroll-behavior:none}
+button,input,select{font:inherit;color:inherit}
+.mono{font-family:var(--f-mono)}
+header{display:flex;align-items:baseline;gap:12px;padding:8px max(16px,env(safe-area-inset-right,0px)) 8px max(16px,env(safe-area-inset-left,0px));border-bottom:1px solid var(--ink)}
+header h1{margin:0;white-space:nowrap;font-size:17px;font-weight:500;letter-spacing:.04em}
+header .sub{font-family:var(--f-mono);font-size:10.5px;letter-spacing:.14em;color:var(--muted);text-transform:uppercase}
+@media (max-width:480px){header .sub{display:none}}
+header .floorname{margin-left:auto;font-family:var(--f-mono);font-size:11px;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:45vw}
+#app{flex:1;min-height:0;display:grid;grid-template-rows:minmax(0,52fr) minmax(0,48fr)}
+@media (min-width:900px){#app{grid-template-columns:minmax(0,1fr) 400px;grid-template-rows:minmax(0,1fr)}#panel{border-top:0!important;border-left:1px solid var(--ink)}}
+#mapWrap{position:relative;min-height:0;background:var(--sheet)}
+#map{width:100%;height:100%;display:block;touch-action:none}
+.chip{position:absolute;font-family:var(--f-mono);font-size:11px;background:var(--sheet);border:1px solid var(--hair);padding:4px 8px;line-height:1.35}
+#modeChip{left:max(8px,env(safe-area-inset-left,0px));top:8px}
+#modeChip:empty{display:none}
+#mapBtns{position:absolute;right:max(8px,env(safe-area-inset-right,0px));bottom:8px;display:flex;gap:6px}
+#mapBtns button{width:36px;height:36px;padding:0;border:1px solid var(--ink);background:var(--sheet);cursor:pointer;font-family:var(--f-mono)}
+#panel{display:flex;flex-direction:column;min-height:0;border-top:1px solid var(--ink);background:var(--paper)}
+.tabs{display:flex;border-bottom:1px solid var(--hair);overflow-x:auto;scrollbar-width:none;padding-left:max(8px,env(safe-area-inset-left,0px))}
+.tabs button{flex:0 0 auto;border:0;background:none;padding:10px 12px 8px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;font-size:14px}
+.tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--signal)}
+.pane{flex:1;min-height:0;overflow:auto;padding:12px max(16px,env(safe-area-inset-right,0px)) calc(24px + env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px))}
+.pane h3{margin:14px 0 6px;font-size:11px;font-family:var(--f-mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:500}
+.pane h3:first-child{margin-top:0}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0}
+.row>label{display:flex;gap:6px;align-items:center}
+.btn,button.b{border:1px solid var(--ink);background:var(--sheet);padding:7px 12px;cursor:pointer;min-height:36px;line-height:1.2}
+.btn.primary,button.b.primary{background:var(--ink);color:var(--paper)}
+.btn.signal,button.b.signal{background:var(--signal);border-color:var(--signal);color:#fff}
+.btn.on,button.b.on{outline:2px solid var(--signal);outline-offset:1px}
+button.b.danger{border-color:var(--signal);color:var(--signal)}
+button.b:disabled{opacity:.4;cursor:default}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--signal);outline-offset:2px}
+input[type=text],input[type=number],select{border:1px solid var(--hair);background:var(--sheet);padding:6px 8px;min-height:36px;min-width:0}
+input[type=number]{width:90px}
+input[type=range]{flex:1;min-width:120px;accent-color:var(--signal)}
+.hint{color:var(--muted);font-size:12.5px;margin:6px 0;text-wrap:pretty}
+.big{font-size:16px;padding:12px 18px!important}
+.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid var(--ink);background:var(--sheet)}
+.stats div{padding:6px 8px;border-right:1px solid var(--hair);border-bottom:1px solid var(--hair);font-family:var(--f-mono);font-variant-numeric:tabular-nums;min-width:0}
+.stats div:nth-child(3n){border-right:0}
+.stats div:nth-last-child(-n+3){border-bottom:0}
+.stats span{display:block;font-size:9.5px;letter-spacing:.1em;color:var(--muted)}
+.stats b{font-weight:500;font-size:15px}
+.pill{display:inline-block;font-family:var(--f-mono);font-size:10.5px;padding:1px 6px;border:1px solid currentColor;line-height:1.5}
+.pill.ok{color:var(--ok)}.pill.warn{color:var(--warn)}.pill.bad{color:var(--signal)}
+.card{border:1px solid var(--hair);background:var(--sheet);padding:10px;margin:8px 0}
+.day{margin:12px 0 4px;font-family:var(--f-mono);font-size:12px;color:var(--ink-2);display:flex;gap:8px;align-items:center}
+.day::after{content:"";flex:1;border-top:1px solid var(--hair)}
+.sess{display:grid;grid-template-columns:auto auto minmax(0,1fr);gap:4px 10px;align-items:center;padding:6px 0;border-bottom:1px dotted var(--hair)}
+.sess .sw{width:12px;height:12px;border-radius:50%}
+.sess .meta{font-family:var(--f-mono);font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.help p,.help li{text-wrap:pretty}
+.help ol,.help ul{padding-left:20px;margin:6px 0}
+.help table{border-collapse:collapse;font-size:12.5px;width:100%}
+.help td,.help th{border:1px solid var(--hair);padding:4px 6px;vertical-align:top;text-align:left}
+.tbl{overflow-x:auto}
+#toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--ink);color:var(--paper);padding:8px 14px;font-size:13px;max-width:min(90vw,480px);z-index:50;pointer-events:none;opacity:0;transition:opacity .2s}
+#toast.show{opacity:1}
+.overlay{position:fixed;inset:0;background:var(--paper);z-index:40;display:flex;flex-direction:column;padding:env(safe-area-inset-top,0px) 0 env(safe-area-inset-bottom,0px)}
+.overlay .ohead{display:flex;gap:8px;align-items:center;padding:8px max(16px,env(safe-area-inset-right,0px)) 8px max(16px,env(safe-area-inset-left,0px));border-bottom:1px solid var(--ink)}
+.overlay .ohead b{flex:1}
+#scanVideo{flex:1;min-height:0;width:100%;object-fit:cover;background:#000}
+#scanMsg{padding:10px 16px;font-size:13px}
+#sheet{overflow:auto;flex:1;padding:16px}
+.qrgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px}
+.qr{border:1px solid #191917;padding:14px;text-align:center;background:#fff;color:#191917;break-inside:avoid}
+.qr svg{width:100%;height:auto;max-width:200px}
+.qr .id{font-family:var(--f-mono);font-size:26px;font-weight:500;letter-spacing:.06em}
+.qr .lb{font-size:13px}.qr .ins{font-size:11px;color:#555;margin-top:6px}
+@media print{body>*:not(#sheetOv){display:none!important}#sheetOv{position:static;display:block!important}#sheetOv .ohead{display:none}.qrgrid{grid-template-columns:repeat(2,1fr)}}
+@media (prefers-reduced-motion:reduce){#toast{transition:none}}
+</style>
+</head>
+<body>
+<header>
+  <h1>步迹</h1><span class="sub">Footfall Trace · ACROSS RCA</span>
+  <span class="floorname" id="hdrFloor"></span>
+</header>
+<div id="app">
+  <div id="mapWrap">
+    <canvas id="map"></canvas>
+    <div class="chip" id="modeChip"></div>
+    <div id="mapBtns"><button id="zoomIn" aria-label="放大">＋</button><button id="zoomOut" aria-label="缩小">－</button><button id="zoomFit" aria-label="适应窗口">⤢</button></div>
+  </div>
+  <div id="panel">
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="rec" aria-selected="true">记录</button>
+      <button role="tab" data-tab="lib">记录库</button>
+      <button role="tab" data-tab="cal">步长校准</button>
+      <button role="tab" data-tab="setup">地图设置</button>
+      <button role="tab" data-tab="help">说明</button>
+    </nav>
+
+    <!-- RECORD -->
+    <section class="pane" id="pane-rec">
+      <div id="recIdle">
+        <div class="row"><label>参与者 <select id="recWho"></select></label><span class="hint" id="recK"></span></div>
+        <div class="row" id="sensorRow"></div>
+        <div class="row"><button class="b primary big" id="btnStart">开始记录</button></div>
+        <p class="hint">开始后先在起点锚点扫码（或手动选锚点）确定位置和朝向。手机竖着拿在胸前，屏幕朝上或朝前都可以，顶端指向你走的方向。屏幕要一直亮着，不要锁屏或切到别的 App。</p>
+        <details class="card" id="simBox">
+          <summary><b>演示模式</b>（没有手机传感器也能看效果）</summary>
+          <p class="hint">在地图上点几个路径点作为“真实路线”，然后开始。演示会故意加入方向漂移和步长误差，看墙体约束和锚点怎么把它拉回来。路径点落在锚点上时，会当作在那里扫了码。</p>
+          <div class="row"><button class="b" id="simUndo">撤销一点</button><button class="b" id="simClear">清空</button><button class="b signal" id="simRun">开始演示</button></div>
+          <div class="row"><label><input type="checkbox" id="simNoCorr"> 关掉墙体约束对比</label></div>
+        </details>
+      </div>
+      <div id="recLive" hidden>
+        <div class="stats" id="liveStats"></div>
+        <div class="row" style="margin-top:10px"><button class="b primary" id="btnScan">扫码校正</button><button class="b" id="btnPick">手动选锚点</button><button class="b danger" id="btnEnd">结束</button></div>
+        <div class="card" id="pickBar" hidden>
+          <div id="pickMsg">在地图上点你旁边的锚点。</div>
+          <div class="row"><button class="b primary" id="pickOk" disabled>确认在此</button><button class="b" id="pickCancel">取消</button></div>
+        </div>
+        <p class="hint" id="liveHint"></p>
+        <div class="row"><label><input type="checkbox" id="showParticles" checked> 显示候选点云</label></div>
+      </div>
+    </section>
+
+    <!-- LIBRARY -->
+    <section class="pane" id="pane-lib" hidden>
+      <div class="row">
+        <button class="b" id="libAll">全选当天</button>
+        <button class="b" id="libNone">取消选择</button>
+        <label><input type="checkbox" id="libHeat"> 热力图</label>
+        <label><input type="checkbox" id="libRaw"> 显示未校正轨迹</label>
+      </div>
+      <div class="row" id="playRow" hidden><span class="mono" id="playT">0:00</span><input type="range" id="play" min="0" max="1000" value="1000" aria-label="回放进度"></div>
+      <div class="row">
+        <button class="b" id="expJson">导出 JSON</button>
+        <button class="b" id="expCsv">导出 CSV</button>
+        <button class="b" id="impBtn">导入</button><input type="file" id="impFile" accept=".json,application/json" multiple hidden>
+        <button class="b danger" id="libDel">删除</button>
+      </div>
+      <div class="card" id="delConfirm" hidden><span id="delMsg"></span><div class="row"><button class="b danger" id="delYes">确定删除</button><button class="b" id="delNo">取消</button></div></div>
+      <p class="hint">导出只包含选中的记录；没选就导出当前地图的全部。CSV 每行一个位置点，带校正前后坐标（单位米，原点是平面图左上角）。</p>
+      <div id="libList"></div>
+    </section>
+
+    <!-- CALIBRATION -->
+    <section class="pane" id="pane-cal" hidden>
+      <h3>参与者</h3>
+      <div class="row"><select id="calWho"></select><button class="b" id="calNew">新建</button><button class="b" id="calRen">改名</button></div>
+      <div class="row" id="calRenRow" hidden><input type="text" id="calName" placeholder="名字" maxlength="20"><button class="b primary" id="calSave">保存</button></div>
+      <p class="hint" id="calInfo"></p>
+      <h3>标定步长</h3>
+      <p class="hint">量一段直线距离（卷尺，或者两块地砖线之间），站在起点，按“开始”，正常速度直线走到终点停下，再按“结束”。走两三遍取平均更准。每个人走路不一样，所以每人做一次。</p>
+      <div class="row"><label>距离 <input type="number" id="calDist" value="10" min="2" max="100" step="0.1"> 米</label>
+        <select id="calPair" aria-label="用两个锚点之间的距离"><option value="">或选两个锚点…</option></select></div>
+      <div class="row"><button class="b primary" id="calGo">开始</button><button class="b" id="calStop" disabled>结束</button><span class="mono" id="calLive"></span></div>
+      <div id="calResult"></div>
+      <h3>传感器测试</h3>
+      <p class="hint">走 20 步，看计数是否一致；原地转一圈，看方向是否转回原值。</p>
+      <div class="row"><button class="b" id="testGo">开始测试</button><span class="mono" id="testLive"></span></div>
+    </section>
+
+    <!-- SETUP -->
+    <section class="pane" id="pane-setup" hidden>
+      <h3>地图</h3>
+      <div class="row"><select id="floorSel" aria-label="选择地图"></select><button class="b" id="floorUpload">上传平面图</button><input type="file" id="floorFile" accept="image/*" hidden><button class="b" id="floorSample">示例平面图</button></div>
+      <div class="row"><label>名称 <input type="text" id="floorName" maxlength="40"></label></div>
+      <p class="hint">平面图用图片（PDF 先截图）。墙线越清晰越好，最好是黑线白底的 CAD 导出图。</p>
+      <h3>① 比例尺</h3>
+      <div class="row"><button class="b" id="mScale">在图上点两点</button><span class="mono" id="scaleInfo"></span></div>
+      <div class="row" id="scaleRow" hidden><label>两点间实际距离 <input type="number" id="scaleDist" min="0.1" step="0.01"> 米</label><button class="b primary" id="scaleApply">应用</button></div>
+      <p class="hint">先定比例尺再改墙体；改比例尺会清掉手动画的墙。</p>
+      <h3>② 墙体（走不过去的地方）</h3>
+      <div class="row"><label><input type="checkbox" id="useImg" checked> 用图里的深色线条当墙</label></div>
+      <div class="row"><span class="hint">深浅阈值</span><input type="range" id="thr" min="20" max="240" value="110" aria-label="墙体阈值"></div>
+      <div class="row"><button class="b" id="mWall">画墙</button><button class="b" id="mErase">擦除（开门洞）</button><button class="b" id="mPan">只平移</button><button class="b" id="ovClear">清除手动修改</button></div>
+      <p class="hint">橙色 = 墙，绿色 = 手动标为可通行。门洞、门的弧线、文字这些被误判成墙的地方，用“擦除”涂掉；桌子、柜子、柱子这种图上没画但走不过去的，用“画墙”涂上。</p>
+      <h3>③ 锚点（二维码校正点）</h3>
+      <div class="row"><button class="b" id="mAnchor">放 / 选锚点</button><button class="b" id="printQR">生成可打印二维码</button></div>
+      <div class="card" id="anchorEd" hidden>
+        <div class="row"><b class="mono" id="aId"></b><label>名称 <input type="text" id="aLabel" maxlength="30"></label></div>
+        <div class="row"><span class="hint">扫码时面朝</span><button class="b" id="aRotL">↺15°</button><span class="mono" id="aFace"></span><button class="b" id="aRotR">↻15°</button><button class="b" id="aAuto">朝最近的墙</button></div>
+        <div class="row"><label><input type="checkbox" id="aExit"> 出口（扫这个码自动结束记录）</label><button class="b danger" id="aDel">删除</button></div>
+      </div>
+      <p class="hint">二维码贴在墙或柱子上，胸口高度。地图上的锚点放在“站着扫码的位置”，箭头指向码（也就是扫码时人面对的方向）。每隔 8–15 米、每个房间门口、拐角放一个最好。楼梯口/电梯口放“出口”码。</p>
+      <h3>分享地图给组员</h3>
+      <div class="row"><button class="b" id="floorExp">导出地图包</button><button class="b" id="floorImp">导入地图包</button><input type="file" id="floorImpFile" accept=".json,application/json" hidden><button class="b danger" id="floorDel">删除此地图</button></div>
+      <p class="hint">地图包包含平面图、墙体和锚点。发给组员导入，大家的坐标就是同一套，记录可以叠在一起看。</p>
+    </section>
+
+    <!-- HELP -->
+    <section class="pane help" id="pane-help" hidden>
+      <h3>它怎么知道你在哪</h3>
+      <p>Web 网页拿不到室内定位（GPS 在楼里不准，iPhone 的 Safari 也不能用蓝牙信标和 AR），所以这里用的是<b>步行航位推算</b>：加速度计数步、估计每步多长，陀螺仪给方向，一步一步往前推。纯推算每走 100 步会偏出几米，所以加了三层校正：</p>
+      <ol>
+        <li><b>墙体约束</b>：同时跟踪 400 个“候选位置”，穿墙的候选被淘汰。走进门、拐过墙角时，误差会自己收紧。这是最主要的校正，走得越曲折越准。</li>
+        <li><b>二维码锚点</b>：扫码时位置和朝向都重新对准，上一段路径会按时间比例回拉（结束后的轨迹是校正过的）。</li>
+        <li><b>个人步长</b>：每个人先走一段已知距离，算出自己的步长系数。</li>
+      </ol>
+      <h3>第一次布置（组里一个人做）</h3>
+      <ol>
+        <li>地图设置 → 上传这层楼的平面图 → 定比例尺 → 检查墙体，涂掉门洞，补上家具。</li>
+        <li>放 6–12 个锚点，生成二维码打印出来，按地图贴好。</li>
+        <li>导出地图包，发给大家导入。</li>
+      </ol>
+      <h3>每个参与者</h3>
+      <ol>
+        <li>步长校准里建自己的名字，走一次 10 米标定。</li>
+        <li>记录 → 开始 → 在附近锚点扫码 → 正常走。路过锚点顺手扫一下（建议每 1–2 分钟一次）。</li>
+        <li>离开这层楼时扫“出口”码，或者按结束。</li>
+        <li>记录库 → 导出 JSON 发给整理数据的人。</li>
+      </ol>
+      <h3>精度和限制</h3>
+      <div class="tbl"><table>
+        <tr><th>情况</th><th>大概误差</th></tr>
+        <tr><td>刚扫完码</td><td>0.3–0.5 m</td></tr>
+        <tr><td>扫码后走 1 分钟，房间结构曲折</td><td>约 1 m</td></tr>
+        <tr><td>扫码后走 3 分钟，大开间</td><td>2–4 m</td></tr>
+      </table></div>
+      <ul>
+        <li>手机放兜里、甩手拿着、边走边打字都会变差；拿稳在胸前最好。</li>
+        <li>锁屏或切走 App 时 iPhone 会停掉传感器，这段时间不会记录（屏幕常亮会自动打开）。</li>
+        <li>上下楼梯不会识别，所以只记一层；扫“出口”码自动结束。</li>
+        <li>数据只存在各自手机的浏览器里，不上传。清浏览器数据前记得导出。</li>
+      </ul>
+      <h3>考虑过但没用的方案</h3>
+      <div class="tbl"><table>
+        <tr><th>方案</th><th>为什么没用</th></tr>
+        <tr><td>蓝牙信标 (iBeacon)</td><td>Web Bluetooth 在 iPhone 上完全不能用；安卓 Chrome 也不能扫信标信号强度。要做就得写原生 App。</td></tr>
+        <tr><td>WebXR / AR 空间追踪</td><td>精度最好（厘米级），但 iPhone Safari 不支持 WebXR，只有安卓 Chrome 能用。</td></tr>
+        <tr><td>Wi-Fi 信号定位</td><td>网页读不到 Wi-Fi 信号强度。</td></tr>
+        <tr><td>GPS</td><td>室内基本不可用。</td></tr>
+        <tr><td>天花板摄像头（预案一的做法）</td><td>最准，参与者也不用拿手机，但要装设备，并且涉及拍摄。</td></tr>
+      </table></div>
+      <p class="hint">数据格式：坐标单位米，x 向右、y 向下，原点为平面图左上角；朝向 0° = 平面图上方，顺时针。</p>
+    </section>
+  </div>
+</div>
+
+<div class="overlay" id="scanOv" hidden>
+  <div class="ohead"><b>对准锚点二维码</b><button class="b" id="scanClose">取消</button></div>
+  <video id="scanVideo" playsinline muted></video>
+  <div id="scanMsg">扫码时人面对着码站好，不用很近。</div>
+</div>
+<div class="overlay" id="sheetOv" hidden>
+  <div class="ohead"><b>锚点二维码</b><button class="b primary" id="sheetPrint">打印</button><button class="b" id="sheetClose">关闭</button></div>
+  <div id="sheet"></div>
+</div>
+<div id="toast" role="status"></div>
+
+<script src="vendor/jsQR.js"></script>
+<script src="vendor/qrcode.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
