@@ -232,7 +232,13 @@ function polyline(pts, color, w, dash) {
   if (pts.length < 2) return; ctx.strokeStyle = color; ctx.lineWidth = px(w); ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.setLineDash(dash || []);
   ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y); for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y); ctx.stroke(); ctx.setLineDash([]);
 }
+function drawBG() {
+  const m = (p, col) => { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(p.x, p.y, px(7), 0, 7); ctx.fill(); };
+  if (BG.start) { m(BG.start, css('--ok')); if (BG.start.face != null) { const h = rad(BG.start.face); ctx.strokeStyle = css('--ok'); ctx.lineWidth = px(3); ctx.beginPath(); ctx.moveTo(BG.start.x, BG.start.y); ctx.lineTo(BG.start.x + Math.sin(h) * px(40), BG.start.y - Math.cos(h) * px(40)); ctx.stroke(); } }
+  if (BG.end) m(BG.end, css('--signal'));
+}
 function drawLive() {
+  if (!live) drawBG();
   if (pickMode && pickTarget && pickTarget.custom) { const t = pickTarget; ctx.fillStyle = css('--signal'); ctx.beginPath(); ctx.arc(t.x, t.y, px(7), 0, 7); ctx.fill(); if (t.face != null) { const h = rad(t.face); ctx.strokeStyle = css('--signal'); ctx.lineWidth = px(3); ctx.beginPath(); ctx.moveTo(t.x, t.y); ctx.lineTo(t.x + Math.sin(h) * px(40), t.y - Math.cos(h) * px(40)); ctx.stroke(); } }
   if (simTruth.length) polyline(simTruth, css('--muted'), 1.2, [px(3), px(4)]);
   if (!live) return;
@@ -299,6 +305,7 @@ function onTap(x, y) {
       refreshAnchorEd(); draw();
     }
   } else if (tab === 'rec') {
+    if (mode === 'bgStart' || mode === 'bgEnd') { bgTap(x, y); return; }
     if (live && pickMode) {
       if (pickTarget && pickTarget.custom && pickTarget.face == null) {
         if (Math.hypot(x - pickTarget.x, y - pickTarget.y) < 0.3) return;
@@ -387,14 +394,15 @@ const tracker = {
     this.estimate();
   },
   step(len, h) {
-    let alive = 0;
+    let alive = 0, killed = 0;
     for (const p of this.p) {
       if (p.w === 0) continue;
       const hh = rad(h + p.hb + randn() * 6), L = Math.max(0.1, len * p.s + randn() * 0.05);
       const nx = p.x + L * Math.sin(hh), ny = p.y - L * Math.cos(hh);
-      if (this.constrain && segBlocked(p.x, p.y, nx, ny)) p.w = 0; else { p.x = nx; p.y = ny; alive++; }
+      if (this.constrain && segBlocked(p.x, p.y, nx, ny)) { p.w = 0; killed++; } else { p.x = nx; p.y = ny; alive++; }
       p.hb += randn() * 0.4; p.s = clamp(p.s + randn() * 0.004, 0.75, 1.3);
     }
+    this.lastKilled = killed;
     if (!alive) { // every candidate hit a wall: re-seed around the last estimate pushed one step forward
       this.recoveries++; const e = this.last; const hh = rad(h);
       this.init(e.x + len * Math.sin(hh), e.y - len * Math.cos(hh), 0.8); return false;
@@ -593,6 +601,134 @@ function runSim(opts = {}) {
   if (fast) { while (live && Sensors.sim) tick(); } else tick();
 }
 
+/* ---------------- Background recordings: Sensor Logger import ----------------
+   Sensor Logger (iOS/Android) keeps logging with the screen locked. We take its
+   Accelerometer (linear, m/s²), Gravity (m/s²) and Gyroscope (rad/s) CSVs, detect
+   steps on the vertical component, integrate the rotation rate about the gravity
+   axis for heading (works whatever way the phone sits in a pocket), then run the
+   same wall-constrained particle filter offline from a start point the user taps. */
+const BG = { raw: null, ev: null, start: null, end: null, sessionId: null };
+function csvCols(text, want) {
+  let i = text.indexOf('\n'); const head = text.slice(0, i).replace(/\r/g, '').split(',').map(h => h.trim().replace(/^"|"$/g, ''));
+  const idx = want.map(w => head.indexOf(w)); if (idx.some(k => k < 0)) return null;
+  const out = want.map(() => []);
+  let p = i + 1; const L = text.length;
+  while (p < L) {
+    let e = text.indexOf('\n', p); if (e < 0) e = L; const line = text.slice(p, e); p = e + 1; if (line.length < 3) continue;
+    const f = line.split(','); for (let k = 0; k < want.length; k++) out[k].push(+f[idx[k]]);
+  }
+  const r = {}; want.forEach((w, k) => r[w] = Float64Array.from(out[k])); return r;
+}
+async function readSensorLogger(file) {
+  const zip = await JSZip.loadAsync(file); const byName = {};
+  zip.forEach((path, f) => { if (!f.dir) byName[path.split('/').pop().toLowerCase()] = f; });
+  const get = async n => byName[n] ? byName[n].async('string') : null;
+  const accT = await get('accelerometer.csv'), grT = await get('gravity.csv'), gyT = await get('gyroscope.csv');
+  if (!accT || !grT || !gyT) throw new Error('zip 里要有 Accelerometer、Gravity、Gyroscope 三个文件。在 Sensor Logger 里把这三个传感器打开再录。');
+  const xyz = ['time', 'x', 'y', 'z'];
+  const A = csvCols(accT, xyz), G = csvCols(grT, xyz), W = csvCols(gyT, xyz);
+  if (!A || !G || !W) throw new Error('CSV 的列名和预期不一样（需要 time, x, y, z）。');
+  for (const S of [A, G, W]) for (let i = 0; i < S.time.length; i++) S.time[i] /= 1e6; // ns → ms
+  let platform = 'ios', device = '', ped = null;
+  const meta = await get('metadata.csv');
+  if (meta) { const [h, v] = meta.split(/\r?\n/); const H = h.split(','), V = (v || '').split(','); const pi = H.indexOf('platform'); if (pi >= 0) platform = (V[pi] || '').toLowerCase().includes('android') ? 'android' : 'ios'; const di = H.indexOf('device name'); if (di >= 0) device = V[di]; }
+  const pedT = await get('pedometer.csv'); if (pedT) { const P = csvCols(pedT, ['time', 'steps']); if (P && P.steps.length) ped = P.steps[P.steps.length - 1] - (P.steps[0] < P.steps[P.steps.length - 1] * 0.5 ? P.steps[0] : 0); }
+  return { A, G, W, platform, device, ped, name: file.name };
+}
+// one pass over the samples → step events {t, amp, yaw (deg, clockwise, arbitrary zero), reorient}
+function bgSteps(raw) {
+  const { A, G, W } = raw; const n = A.time.length; const down = raw.platform === 'android' ? -1 : 1; // iOS gravity points down, Android's points up
+  let gi = 0, wi = 0, yaw = 0, lastT = A.time[0], lp = 0, st = 0, peak = 0, peakT = 0, trough = 0, lastStepT = -1e9, avgPeak = 2;
+  const ev = []; let lastStepG = null;
+  for (let i = 0; i < n; i++) {
+    const t = A.time[i];
+    while (gi + 1 < G.time.length && G.time[gi + 1] <= t) gi++;
+    while (wi + 1 < W.time.length && W.time[wi + 1] <= t) wi++;
+    let gx = G.x[gi], gy = G.y[gi], gz = G.z[gi]; const gn = Math.hypot(gx, gy, gz) || 1; gx = gx / gn * down; gy = gy / gn * down; gz = gz / gn * down; // unit vector pointing down
+    const dt = clamp((t - lastT) / 1000, 0, 0.2); lastT = t;
+    yaw += deg(W.x[wi] * gx + W.y[wi] * gy + W.z[wi] * gz) * dt; // clockwise heading change = rotation rate about the down axis
+    const v = -(A.x[i] * gx + A.y[i] * gy + A.z[i] * gz);         // upward linear acceleration
+    lp += 0.3 * (v - lp);
+    const thr = clamp(0.4 * avgPeak, 0.5, 2.2);
+    if (st === 0) { if (lp < trough) trough = lp; if (lp > thr) { st = 1; peak = lp; peakT = t; } }
+    else {
+      if (lp > peak) { peak = lp; peakT = t; }
+      if (lp < 0) {
+        if (peakT - lastStepT > 280) {
+          const g = [gx, gy, gz]; let reorient = false;
+          if (lastStepG && peakT - lastStepT > 5000) { const c = g[0] * lastStepG[0] + g[1] * lastStepG[1] + g[2] * lastStepG[2]; reorient = c < Math.cos(rad(20)); }
+          ev.push({ t: peakT, amp: peak - Math.min(trough, 0), yaw, reorient }); lastStepG = g;
+          avgPeak = 0.8 * avgPeak + 0.2 * peak; lastStepT = peakT;
+        }
+        st = 0; trough = lp;
+      }
+    }
+  }
+  return ev;
+}
+function bgRunFilter(ev, start, end, sign, stepLen) {
+  const N0 = Math.min(5, ev.length); let s = 0, c = 0; for (let i = 0; i < N0; i++) { s += Math.sin(rad(sign * ev[i].yaw)); c += Math.cos(rad(sign * ev[i].yaw)); }
+  const offset = start.face - deg(Math.atan2(s, c));
+  tracker.constrain = true; tracker.recoveries = 0; tracker.init(start.x, start.y, 0.4);
+  for (const p of tracker.p) p.hb = randn() * 8;
+  const path = [{ t: ev[0].t - 500, x: start.x, y: start.y, sd: 0.4, anchor: 'start' }], steps = []; let kills = 0;
+  for (const e of ev) {
+    if (e.reorient) for (const p of tracker.p) p.hb += randn() * 15;
+    const h = n360(sign * e.yaw + offset); const before = tracker.p.filter(p => p.w > 0).length;
+    tracker.step(stepLen, h); kills += tracker.lastKilled / Math.max(1, before);
+    const q = tracker.last; steps.push({ t: e.t, len: +stepLen.toFixed(3), amp: +e.amp.toFixed(2), yaw: +(sign * e.yaw).toFixed(1), h: +h.toFixed(1) });
+    path.push({ t: e.t, x: +q.x.toFixed(3), y: +q.y.toFixed(3), sd: +q.sd.toFixed(2) });
+  }
+  const anchors = [{ t: path[0].t, id: 'start', x: start.x, y: start.y, pathIndex: 0, estX: null, estY: null, err: null }];
+  if (end) { const q = tracker.last, t = ev.at(-1).t + 500; anchors.push({ t, id: 'end', x: end.x, y: end.y, pathIndex: path.length, estX: +q.x.toFixed(3), estY: +q.y.toFixed(3), err: +Math.hypot(q.x - end.x, q.y - end.y).toFixed(2) }); path.push({ t, x: end.x, y: end.y, sd: 0.4, anchor: 'end' }); }
+  return { path, steps, anchors, offset, kills: kills / ev.length, recoveries: tracker.recoveries };
+}
+$('#bgPick').onclick = () => $('#bgFile').click();
+$('#bgFile').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  $('#bgInfo').innerHTML = '<p class="hint">读取中…两小时的记录可能要十几秒。</p>';
+  try {
+    const raw = await readSensorLogger(f); const ev = bgSteps(raw);
+    BG.raw = raw; BG.ev = ev; BG.start = null; BG.end = null; BG.sessionId = null;
+    const T = (raw.A.time.at(-1) - raw.A.time[0]) / 1000;
+    if (ev.length < 10) { $('#bgInfo').innerHTML = `<div class="card"><span class="pill bad">步数太少</span> 只识别到 ${ev.length} 步。确认录的时候在走动，加速度计和重力都开着。</div>`; $('#bgCtl').hidden = true; return; }
+    const pedTxt = raw.ped ? ` · 手机计步器 ${raw.ped} 步` : '';
+    $('#bgInfo').innerHTML = `<div class="card"><b>${esc(raw.name)}</b><br><span class="mono">${ymd(raw.A.time[0])} ${hm(raw.A.time[0])} 起 · ${dur(T)} · 识别到 ${ev.length} 步${pedTxt} · ${raw.platform === 'android' ? '安卓' : 'iPhone'}</span></div>`;
+    $('#bgCtl').hidden = false; $('#bgRun').disabled = true; $('#bgMsg').textContent = '在地图上点起点，再点出发后先走的方向。';
+    setMode('bgStart'); draw();
+  } catch (err) { $('#bgInfo').innerHTML = `<div class="card"><span class="pill bad">读不了</span> ${esc(err.message || err)}</div>`; }
+};
+$('#bgSetStart').onclick = () => { BG.start = null; $('#bgRun').disabled = true; $('#bgMsg').textContent = '在地图上点起点，再点出发后先走的方向。'; setMode('bgStart'); };
+$('#bgSetEnd').onclick = () => { $('#bgMsg').textContent = '在地图上点停止录制时站的位置。'; setMode('bgEnd'); };
+function bgTap(x, y) {
+  if (mode === 'bgStart') {
+    if (!BG.start || BG.start.face != null) { if (isWallAt(x, y)) return toast('这里是墙'); BG.start = { x, y, face: null }; $('#bgMsg').textContent = '再点一下出发后先走的方向。'; }
+    else { BG.start.face = n360(deg(Math.atan2(x - BG.start.x, -(y - BG.start.y)))); $('#bgRun').disabled = false; $('#bgMsg').textContent = '可以生成了。知道终点的话点 ② 加上，会更准。'; setMode('view'); }
+  } else if (mode === 'bgEnd') { if (isWallAt(x, y)) return toast('这里是墙'); BG.end = { x, y }; $('#bgMsg').textContent = '终点已设。'; setMode('view'); }
+  draw();
+}
+$('#bgRun').onclick = async () => {
+  if (!BG.ev || !BG.start || BG.start.face == null) return;
+  $('#bgRun').disabled = true; $('#bgMsg').textContent = '计算中…'; await new Promise(r => setTimeout(r, 30));
+  const p = prof(); const stepLen = clamp(p.K * Math.pow(3.2, 0.25), 0.5, 0.95);
+  // detection in a pocket sometimes counts one peak per stride: use the phone's own pedometer to rescale
+  let len = stepLen; if (BG.raw.ped) { const r = BG.raw.ped / BG.ev.length; if (r > 1.6 && r < 2.4) len = stepLen * r; }
+  let best;
+  if ($('#bgFlip').dataset.auto !== 'off') {
+    const a = bgRunFilter(BG.ev, BG.start, BG.end, 1, len), b = bgRunFilter(BG.ev, BG.start, BG.end, -1, len);
+    const flip = b.kills + 0.02 < a.kills; $('#bgFlip').checked = flip; best = flip ? b : a;
+  } else best = bgRunFilter(BG.ev, BG.start, BG.end, $('#bgFlip').checked ? -1 : 1, len);
+  const t0 = best.path[0].t;
+  const s = { id: BG.sessionId || uid('s'), format: 'footfall-trace/v1', source: 'sensorlogger', sourceFile: BG.raw.name, floorId: floor.id, floorName: floor.name, participant: p.name, participantId: p.id, K: p.K, calibrated: !!p.calibrated,
+    sim: false, date: ymd(t0), startedAt: t0, endedAt: best.path.at(-1).t, offset: +best.offset.toFixed(1), steps: best.steps, path: best.path, anchors: best.anchors, gaps: [], recoveries: best.recoveries, device: BG.raw.device || BG.raw.platform, endReason: '后台记录导入' };
+  BG.sessionId = s.id; tracker.p = []; tracker.last = null;
+  await DB.put('sessions', s); libSel = new Set([s.id]); await loadSessions();
+  $('#bgRun').disabled = false;
+  $('#bgMsg').textContent = `已生成：${s.steps.length} 步，${pathLen(s).toFixed(0)} m` + (best.anchors[1] ? `，终点偏差 ${best.anchors[1].err} m（已按时间拉回）` : '') + '。在“记录库”里看。看着像镜像了就勾“左右镜像”再生成一次。';
+  switchTab('lib');
+};
+$('#bgFlip').onchange = () => { $('#bgFlip').dataset.auto = 'off'; };
+
 /* ---------------- Calibration ---------------- */
 let calRun = null, testRun = null;
 function refreshCalPairs() {
@@ -654,7 +790,7 @@ function renderLib() {
     for (const s of days[d]) {
       const len = pathLen(s), mins = ((s.endedAt || s.path.at(-1)?.t || s.startedAt) - s.startedAt) / 60000;
       h += `<label class="sess"><input type="checkbox" data-id="${s.id}" ${libSel.has(s.id) ? 'checked' : ''}><span class="sw" style="background:${sessColor(s)}"></span>
-        <span><b>${esc(s.participant)}</b>${s.sim ? ' <span class="pill">演示</span>' : ''}${s.calibrated ? '' : ' <span class="pill warn">未校准</span>'}<br>
+        <span><b>${esc(s.participant)}</b>${s.sim ? ' <span class="pill">演示</span>' : ''}${s.source === 'sensorlogger' ? ' <span class="pill">后台</span>' : ''}${s.calibrated ? '' : ' <span class="pill warn">未校准</span>'}<br>
         <span class="meta">${hm(s.startedAt)}–${hm(s.endedAt || s.startedAt)} · ${mins.toFixed(0)} 分 · ${s.steps.length} 步 · ${len.toFixed(0)} m · 校正 ${Math.max(0, s.anchors.length - 1)} 次${s.anchors.length > 1 ? ' · 平均偏差 ' + avgErr(s) + ' m' : ''}</span></span></label>`;
     }
   }
@@ -733,7 +869,7 @@ function setMode(m) {
   mode = m; scalePts = []; $('#scaleRow').hidden = true; brushCursor = null;
   const map = { scale: '#mScale', wall: '#mWall', erase: '#mErase', anchor: '#mAnchor', view: '#mPan' };
   Object.entries(map).forEach(([k, s]) => $(s).classList.toggle('on', k === m));
-  $('#modeChip').textContent = { scale: '比例尺：点两个已知距离的点', wall: '画墙：拖动涂抹 · 双指缩放', erase: '擦除：拖动涂掉误判的墙 · 双指缩放', anchor: '锚点：点空白处新建，点已有的选中' }[m] || '';
+  $('#modeChip').textContent = { scale: '比例尺：点两个已知距离的点', wall: '画墙：拖动涂抹 · 双指缩放', erase: '擦除：拖动涂掉误判的墙 · 双指缩放', anchor: '锚点：点空白处新建，点已有的选中', bgStart: '后台记录：点起点，再点出发方向', bgEnd: '后台记录：点终点' }[m] || '';
   draw();
 }
 $('#mScale').onclick = () => setMode(mode === 'scale' ? 'view' : 'scale');
