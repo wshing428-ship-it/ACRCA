@@ -134,13 +134,13 @@ input[type=range]{flex:1;min-width:120px;accent-color:var(--signal)}
           <p class="hint">网页在锁屏后会停止，所以长时间记录用免费 App <a href="https://apps.apple.com/app/sensor-logger/id1531582925" target="_blank" rel="noopener">Sensor Logger</a>（安卓也有）。录完把导出的 zip 放进来，这里还原成平面图上的轨迹。</p>
           <ol class="hint" style="padding-left:18px;margin:4px 0">
             <li>Sensor Logger 里只勾 加速度计、重力、陀螺仪、计步器，采样率设 50 Hz；定位权限选“始终允许”（App 说这样后台才不会停）。</li>
-            <li>大家都在同一个起点（比如门口）按开始，锁屏放口袋，先朝同一个方向直走几步。</li>
-            <li>最后回到起点按停止，导出为 Zipped CSV，发给整理数据的人。</li>
+            <li>在自己房间门口按开始，锁屏放口袋，先往房间里走几步。</li>
+            <li>最后回到门口按停止，导出为 Zipped CSV，连同名字和房间发给整理数据的人。</li>
           </ol>
           <div class="row"><button class="b" id="bgPick">选择 zip（可以一次选多个人的）</button><input type="file" id="bgFile" accept=".zip,application/zip" multiple hidden></div>
           <div id="bgInfo"></div>
           <div id="bgCtl" hidden>
-            <div class="row"><button class="b" id="bgSetStart">重新点起点 + 出发方向</button><label><input type="checkbox" id="bgLoop" checked> 大家最后都回到起点停止</label></div>
+            <div class="row"><label><input type="checkbox" id="bgLoop" checked> 每个人最后都回到自己的起点停止</label></div>
             <div class="row"><button class="b primary" id="bgRun" disabled>生成轨迹</button></div>
             <p class="hint" id="bgMsg"></p>
           </div>

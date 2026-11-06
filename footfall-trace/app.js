@@ -233,8 +233,12 @@ function polyline(pts, color, w, dash) {
   ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y); for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y); ctx.stroke(); ctx.setLineDash([]);
 }
 function drawBG() {
-  const m = (p, col) => { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(p.x, p.y, px(7), 0, 7); ctx.fill(); };
-  if (BG.start) { m(BG.start, css('--ok')); if (BG.start.face != null) { const h = rad(BG.start.face); ctx.strokeStyle = css('--ok'); ctx.lineWidth = px(3); ctx.beginPath(); ctx.moveTo(BG.start.x, BG.start.y); ctx.lineTo(BG.start.x + Math.sin(h) * px(40), BG.start.y - Math.cos(h) * px(40)); ctx.stroke(); } }
+  for (const it of BG.items) {
+    const st = it.start; if (!st) continue; const col = it.id === BG.picking ? css('--signal') : css('--ok');
+    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(st.x, st.y, px(7), 0, 7); ctx.fill();
+    if (st.face != null) { const h = rad(st.face); ctx.strokeStyle = col; ctx.lineWidth = px(3); ctx.beginPath(); ctx.moveTo(st.x, st.y); ctx.lineTo(st.x + Math.sin(h) * px(34), st.y - Math.cos(h) * px(34)); ctx.stroke(); }
+    ctx.fillStyle = css('--ink'); ctx.font = `500 ${px(11)}px sans-serif`; ctx.fillText(it.name || it.file, st.x + px(10), st.y + px(16));
+  }
 }
 function drawLive() {
   if (!live) drawBG();
@@ -606,7 +610,7 @@ function runSim(opts = {}) {
    steps on the vertical component, integrate the rotation rate about the gravity
    axis for heading (works whatever way the phone sits in a pocket), then run the
    same wall-constrained particle filter offline from a start point the user taps. */
-const BG = { start: null, loop: true, items: [] };
+const BG = { picking: null, loop: true, items: [] };
 function csvCols(text, want) {
   let i = text.indexOf('\n'); const head = text.slice(0, i).replace(/\r/g, '').split(',').map(h => h.trim().replace(/^"|"$/g, ''));
   const idx = want.map(w => head.indexOf(w)); if (idx.some(k => k < 0)) return null;
@@ -684,11 +688,11 @@ function bgRunFilter(ev, start, end, sign, stepLen) {
   return { path, steps, anchors, offset, kills: kills / ev.length, recoveries: tracker.recoveries };
 }
 $('#bgPick').onclick = () => $('#bgFile').click();
-// several people's zips can be loaded at once; they share one start point (and, by default, the same end point)
+// several people's zips at once; each person has their own start point (their own room's door, desk…)
 $('#bgFile').onchange = async e => {
   const files = [...e.target.files]; e.target.value = ''; if (!files.length) return;
   for (const f of files) {
-    const it = { id: uid('b'), file: f.name, name: /^[\d_-]/.test(f.name) ? '' : f.name.replace(/\.zip$/i, ''), status: '读取中…' };
+    const it = { id: uid('b'), file: f.name, name: /^[\d_-]/.test(f.name) ? '' : f.name.replace(/\.zip$/i, ''), status: '读取中…', start: null };
     BG.items.push(it); renderBG();
     try {
       const raw = await readSensorLogger(f); const ev = bgSteps(raw);
@@ -697,46 +701,56 @@ $('#bgFile').onchange = async e => {
     } catch (err) { it.status = '读不了：' + (err.message || err); }
     renderBG(); await new Promise(r => setTimeout(r, 0));
   }
-  if (!BG.start && floor.bgStart) BG.start = { ...floor.bgStart };
-  if (!BG.start) { $('#bgMsg').textContent = '在地图上点起点，再点出发后先走的方向。'; setMode('bgStart'); }
-  else $('#bgMsg').textContent = '用的是上次设的起点。不对的话点“重新点起点”。';
+  const first = BG.items.find(i => i.ev && !i.start); if (first) bgPickStart(first);
   renderBG(); draw();
 };
-function bgReady() { return !!(BG.start && BG.start.face != null && BG.items.some(i => i.ev && i.ev.length >= 10)); }
+function bgPickStart(it) { BG.picking = it.id; it.start = null; $('#bgMsg').textContent = `在地图上点「${it.name || it.file}」的起点，再点出发后先走的方向。`; setMode('bgStart'); renderBG(); draw(); }
+function bgReady() { return BG.items.some(i => i.ev && i.ev.length >= 10 && i.start && i.start.face != null); }
 function renderBG() {
   $('#bgCtl').hidden = !BG.items.length;
-  $('#bgInfo').innerHTML = BG.items.map(it => {
+  $('#bgInfo').innerHTML = BG.items.map((it, k) => {
     const st = it.status || ''; const cls = st.startsWith('已') ? 'ok' : (st.startsWith('读取') || st.startsWith('计算')) ? '' : 'bad';
-    return `<div class="card"><div class="row" style="margin:0"><label>名字 <input type="text" data-bgname="${it.id}" value="${esc(it.name)}" placeholder="谁录的" maxlength="20" style="width:8em"></label><button class="b" data-bgdel="${it.id}" style="min-height:28px;padding:2px 8px">移除</button></div>
+    const prev = BG.items.slice(0, k).reverse().find(q => q.start && q.start.face != null);
+    const sTxt = it.start && it.start.face != null ? '<span class="pill ok">起点已设</span>' : BG.picking === it.id ? '<span class="pill warn">正在地图上点…</span>' : '<span class="pill warn">还没设起点</span>';
+    return `<div class="card"${BG.picking === it.id ? ' style="outline:2px solid var(--signal)"' : ''}><div class="row" style="margin:0"><label>名字 <input type="text" data-bgname="${it.id}" value="${esc(it.name)}" placeholder="谁录的" maxlength="20" style="width:8em"></label><button class="b" data-bgdel="${it.id}" style="min-height:28px;padding:2px 8px">移除</button></div>
     <span class="mono" style="font-size:11.5px;color:var(--muted)">${esc(it.file)}${it.ev ? ` · ${ymd(it.t0)} ${hm(it.t0)} 起 · ${dur(it.T)} · ${it.ev.length} 步${it.ped ? '（手机计步 ' + it.ped + '）' : ''}` : ''}</span>
-    ${st ? `<br><span class="pill ${cls}">${esc(st)}</span>` : ''}${it.sessionId ? ` <button class="b" data-bgflip="${it.id}" style="min-height:28px;padding:2px 8px">看着左右反了？镜像重算</button>` : ''}</div>`;
+    ${it.ev ? `<div class="row" style="margin:4px 0 0">${sTxt}<button class="b" data-bgstart="${it.id}" style="min-height:28px;padding:2px 8px">点起点</button>${prev && !(it.start && it.start.face != null) ? `<button class="b" data-bgsame="${it.id}" style="min-height:28px;padding:2px 8px">和上一个同起点</button>` : ''}</div>` : ''}
+    ${st ? `<span class="pill ${cls}">${esc(st)}</span>` : ''}${it.sessionId ? ` <button class="b" data-bgflip="${it.id}" style="min-height:28px;padding:2px 8px">看着左右反了？镜像重算</button>` : ''}</div>`;
   }).join('');
-  $$('#bgInfo [data-bgname]').forEach(i => i.oninput = () => { BG.items.find(q => q.id === i.dataset.bgname).name = i.value.trim(); });
-  $$('#bgInfo [data-bgdel]').forEach(b => b.onclick = () => { BG.items = BG.items.filter(q => q.id !== b.dataset.bgdel); renderBG(); });
+  $$('#bgInfo [data-bgname]').forEach(i => i.oninput = () => { BG.items.find(q => q.id === i.dataset.bgname).name = i.value.trim(); draw(); });
+  $$('#bgInfo [data-bgdel]').forEach(b => b.onclick = () => { BG.items = BG.items.filter(q => q.id !== b.dataset.bgdel); if (BG.picking === b.dataset.bgdel) { BG.picking = null; setMode('view'); } renderBG(); draw(); });
+  $$('#bgInfo [data-bgstart]').forEach(b => b.onclick = () => bgPickStart(BG.items.find(q => q.id === b.dataset.bgstart)));
+  $$('#bgInfo [data-bgsame]').forEach(b => b.onclick = () => { const k = BG.items.findIndex(q => q.id === b.dataset.bgsame); const prev = BG.items.slice(0, k).reverse().find(q => q.start && q.start.face != null); BG.items[k].start = { ...prev.start }; bgNextPick(); });
   $$('#bgInfo [data-bgflip]').forEach(b => b.onclick = async () => { const it = BG.items.find(q => q.id === b.dataset.bgflip); it.forceSign = -(it.sign || 1); await bgGenerate([it]); switchTab('lib'); });
   $('#bgRun').disabled = !bgReady();
-  $('#bgRun').textContent = BG.items.length > 1 ? `生成全部 ${BG.items.length} 条轨迹` : '生成轨迹';
+  const n = BG.items.filter(i => i.ev && i.start && i.start.face != null).length;
+  $('#bgRun').textContent = BG.items.length > 1 ? `生成 ${n} 条轨迹` : '生成轨迹';
   $('#bgLoop').checked = BG.loop !== false;
 }
+function bgNextPick() {
+  const next = BG.items.find(i => i.ev && i.ev.length >= 10 && !(i.start && i.start.face != null));
+  if (next) bgPickStart(next); else { BG.picking = null; setMode('view'); $('#bgMsg').textContent = '起点都设好了，可以生成。'; renderBG(); draw(); }
+}
 $('#bgLoop').onchange = e => { BG.loop = e.target.checked; };
-$('#bgSetStart').onclick = () => { BG.start = null; $('#bgRun').disabled = true; $('#bgMsg').textContent = '在地图上点起点，再点出发后先走的方向。'; setMode('bgStart'); draw(); };
 function bgTap(x, y) {
-  if (!BG.start || BG.start.face != null) { if (isWallAt(x, y)) return toast('这里是墙'); BG.start = { x, y, face: null }; $('#bgMsg').textContent = '再点一下出发后先走的方向。'; }
-  else { BG.start.face = n360(deg(Math.atan2(x - BG.start.x, -(y - BG.start.y)))); floor.bgStart = { ...BG.start }; saveFloor(); $('#bgMsg').textContent = '起点已设，会记住，下次不用再点。'; setMode('view'); renderBG(); }
-  draw();
+  const it = BG.items.find(q => q.id === BG.picking); if (!it) return;
+  if (!it.start || it.start.face != null) { if (isWallAt(x, y)) return toast('这里是墙'); it.start = { x, y, face: null }; $('#bgMsg').textContent = '再点一下出发后先走的方向。'; }
+  else { it.start.face = n360(deg(Math.atan2(x - it.start.x, -(y - it.start.y)))); bgNextPick(); return; }
+  renderBG(); draw();
 }
 async function bgGenerate(items) {
   $('#bgRun').disabled = true; const done = [];
   for (const it of items) {
     if (!it.ev || it.ev.length < 10) continue;
+    if (!it.start || it.start.face == null) { it.status = '先点起点'; continue; }
     it.status = '计算中…'; renderBG(); await new Promise(r => setTimeout(r, 20));
     // step length: the phone's own pedometer distance when it logged one, else a typical adult step
     let len = 0.68; if (it.pedDist && it.ped) { const L = it.pedDist / it.ped; if (L > 0.4 && L < 1) len = L; }
     if (it.ped) { const r = it.ped / it.ev.length; if (r > 1.6 && r < 2.4) len *= r; } // pocket: one detected peak per stride
-    const end = BG.loop !== false ? { x: BG.start.x, y: BG.start.y } : null;
+    const end = BG.loop !== false ? { x: it.start.x, y: it.start.y } : null;
     let best;
-    if (it.forceSign) { best = bgRunFilter(it.ev, BG.start, end, it.forceSign, len); it.sign = it.forceSign; it.forceSign = 0; }
-    else { const a = bgRunFilter(it.ev, BG.start, end, 1, len), b = bgRunFilter(it.ev, BG.start, end, -1, len); const flip = b.kills + 0.02 < a.kills; best = flip ? b : a; it.sign = flip ? -1 : 1; }
+    if (it.forceSign) { best = bgRunFilter(it.ev, it.start, end, it.forceSign, len); it.sign = it.forceSign; it.forceSign = 0; }
+    else { const a = bgRunFilter(it.ev, it.start, end, 1, len), b = bgRunFilter(it.ev, it.start, end, -1, len); const flip = b.kills + 0.02 < a.kills; best = flip ? b : a; it.sign = flip ? -1 : 1; }
     const t0 = best.path[0].t; const who = it.name || '未命名';
     const s = { id: it.sessionId || uid('s'), format: 'footfall-trace/v1', source: 'sensorlogger', sourceFile: it.file, floorId: floor.id, floorName: floor.name, participant: who, participantId: 'name:' + who, K: null, calibrated: !!it.pedDist,
       sim: false, date: ymd(t0), startedAt: t0, endedAt: best.path[best.path.length - 1].t, offset: +best.offset.toFixed(1), steps: best.steps, path: best.path, anchors: best.anchors, gaps: [], recoveries: best.recoveries, device: it.device || it.platform, endReason: '后台记录导入' };
