@@ -134,14 +134,14 @@ input[type=range]{flex:1;min-width:120px;accent-color:var(--signal)}
           <p class="hint">网页在锁屏后会停止，所以长时间记录用免费 App <a href="https://apps.apple.com/app/sensor-logger/id1531582925" target="_blank" rel="noopener">Sensor Logger</a>（安卓也有）。录完把导出的 zip 放进来，这里还原成平面图上的轨迹。</p>
           <ol class="hint" style="padding-left:18px;margin:4px 0">
             <li>Sensor Logger 里只勾 加速度计、重力、陀螺仪、计步器，采样率设 50 Hz；定位权限选“始终允许”（App 说这样后台才不会停）。</li>
-            <li>站在一个你在地图上能指出来的位置，按开始，锁屏放口袋。出发后先朝一个明确的方向直走几步（比如沿走廊）。</li>
-            <li>离开这层楼时按停止，导出为 Zipped CSV。</li>
+            <li>大家都在同一个起点（比如门口）按开始，锁屏放口袋，先朝同一个方向直走几步。</li>
+            <li>最后回到起点按停止，导出为 Zipped CSV，发给整理数据的人。</li>
           </ol>
-          <div class="row"><button class="b" id="bgPick">选择导出的 zip</button><input type="file" id="bgFile" accept=".zip,application/zip" hidden></div>
+          <div class="row"><button class="b" id="bgPick">选择 zip（可以一次选多个人的）</button><input type="file" id="bgFile" accept=".zip,application/zip" multiple hidden></div>
           <div id="bgInfo"></div>
           <div id="bgCtl" hidden>
-            <div class="row"><button class="b" id="bgSetStart">① 点起点 + 出发方向</button><button class="b" id="bgSetEnd">② 点终点（可选）</button></div>
-            <div class="row"><button class="b primary" id="bgRun" disabled>生成轨迹</button><label><input type="checkbox" id="bgFlip"> 左右镜像</label></div>
+            <div class="row"><button class="b" id="bgSetStart">重新点起点 + 出发方向</button><label><input type="checkbox" id="bgLoop" checked> 大家最后都回到起点停止</label></div>
+            <div class="row"><button class="b primary" id="bgRun" disabled>生成轨迹</button></div>
             <p class="hint" id="bgMsg"></p>
           </div>
         </details>

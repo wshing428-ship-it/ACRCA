@@ -235,7 +235,6 @@ function polyline(pts, color, w, dash) {
 function drawBG() {
   const m = (p, col) => { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(p.x, p.y, px(7), 0, 7); ctx.fill(); };
   if (BG.start) { m(BG.start, css('--ok')); if (BG.start.face != null) { const h = rad(BG.start.face); ctx.strokeStyle = css('--ok'); ctx.lineWidth = px(3); ctx.beginPath(); ctx.moveTo(BG.start.x, BG.start.y); ctx.lineTo(BG.start.x + Math.sin(h) * px(40), BG.start.y - Math.cos(h) * px(40)); ctx.stroke(); } }
-  if (BG.end) m(BG.end, css('--signal'));
 }
 function drawLive() {
   if (!live) drawBG();
@@ -305,7 +304,7 @@ function onTap(x, y) {
       refreshAnchorEd(); draw();
     }
   } else if (tab === 'rec') {
-    if (mode === 'bgStart' || mode === 'bgEnd') { bgTap(x, y); return; }
+    if (mode === 'bgStart') { bgTap(x, y); return; }
     if (live && pickMode) {
       if (pickTarget && pickTarget.custom && pickTarget.face == null) {
         if (Math.hypot(x - pickTarget.x, y - pickTarget.y) < 0.3) return;
@@ -607,7 +606,7 @@ function runSim(opts = {}) {
    steps on the vertical component, integrate the rotation rate about the gravity
    axis for heading (works whatever way the phone sits in a pocket), then run the
    same wall-constrained particle filter offline from a start point the user taps. */
-const BG = { raw: null, ev: null, start: null, end: null, sessionId: null };
+const BG = { start: null, loop: true, items: [] };
 function csvCols(text, want) {
   let i = text.indexOf('\n'); const head = text.slice(0, i).replace(/\r/g, '').split(',').map(h => h.trim().replace(/^"|"$/g, ''));
   const idx = want.map(w => head.indexOf(w)); if (idx.some(k => k < 0)) return null;
@@ -632,8 +631,9 @@ async function readSensorLogger(file) {
   let platform = 'ios', device = '', ped = null;
   const meta = await get('metadata.csv');
   if (meta) { const [h, v] = meta.split(/\r?\n/); const H = h.split(','), V = (v || '').split(','); const pi = H.indexOf('platform'); if (pi >= 0) platform = (V[pi] || '').toLowerCase().includes('android') ? 'android' : 'ios'; const di = H.indexOf('device name'); if (di >= 0) device = V[di]; }
-  const pedT = await get('pedometer.csv'); if (pedT) { const P = csvCols(pedT, ['time', 'steps']); if (P && P.steps.length) ped = P.steps[P.steps.length - 1] - (P.steps[0] < P.steps[P.steps.length - 1] * 0.5 ? P.steps[0] : 0); }
-  return { A, G, W, platform, device, ped, name: file.name };
+  let pedDist = null;
+  const pedT = await get('pedometer.csv'); if (pedT) { const P = csvCols(pedT, ['time', 'steps']); if (P && P.steps.length) ped = P.steps[P.steps.length - 1] - (P.steps[0] < P.steps[P.steps.length - 1] * 0.5 ? P.steps[0] : 0); const PD = csvCols(pedT, ['time', 'distance']); if (PD && PD.distance.length && PD.distance[PD.distance.length - 1] > 0) { const d1 = PD.distance[PD.distance.length - 1]; pedDist = d1 - (PD.distance[0] < d1 * 0.5 ? PD.distance[0] : 0); } }
+  return { A, G, W, platform, device, ped, pedDist, name: file.name };
 }
 // one pass over the samples → step events {t, amp, yaw (deg, clockwise, arbitrary zero), reorient}
 function bgSteps(raw) {
@@ -684,50 +684,72 @@ function bgRunFilter(ev, start, end, sign, stepLen) {
   return { path, steps, anchors, offset, kills: kills / ev.length, recoveries: tracker.recoveries };
 }
 $('#bgPick').onclick = () => $('#bgFile').click();
+// several people's zips can be loaded at once; they share one start point (and, by default, the same end point)
 $('#bgFile').onchange = async e => {
-  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
-  $('#bgInfo').innerHTML = '<p class="hint">读取中…两小时的记录可能要十几秒。</p>';
-  try {
-    const raw = await readSensorLogger(f); const ev = bgSteps(raw);
-    BG.raw = raw; BG.ev = ev; BG.start = null; BG.end = null; BG.sessionId = null;
-    const T = (raw.A.time.at(-1) - raw.A.time[0]) / 1000;
-    if (ev.length < 10) { $('#bgInfo').innerHTML = `<div class="card"><span class="pill bad">步数太少</span> 只识别到 ${ev.length} 步。确认录的时候在走动，加速度计和重力都开着。</div>`; $('#bgCtl').hidden = true; return; }
-    const pedTxt = raw.ped ? ` · 手机计步器 ${raw.ped} 步` : '';
-    $('#bgInfo').innerHTML = `<div class="card"><b>${esc(raw.name)}</b><br><span class="mono">${ymd(raw.A.time[0])} ${hm(raw.A.time[0])} 起 · ${dur(T)} · 识别到 ${ev.length} 步${pedTxt} · ${raw.platform === 'android' ? '安卓' : 'iPhone'}</span></div>`;
-    $('#bgCtl').hidden = false; $('#bgRun').disabled = true; $('#bgMsg').textContent = '在地图上点起点，再点出发后先走的方向。';
-    setMode('bgStart'); draw();
-  } catch (err) { $('#bgInfo').innerHTML = `<div class="card"><span class="pill bad">读不了</span> ${esc(err.message || err)}</div>`; }
+  const files = [...e.target.files]; e.target.value = ''; if (!files.length) return;
+  for (const f of files) {
+    const it = { id: uid('b'), file: f.name, name: /^[\d_-]/.test(f.name) ? '' : f.name.replace(/\.zip$/i, ''), status: '读取中…' };
+    BG.items.push(it); renderBG();
+    try {
+      const raw = await readSensorLogger(f); const ev = bgSteps(raw);
+      Object.assign(it, { ev, ped: raw.ped, pedDist: raw.pedDist, platform: raw.platform, device: raw.device, t0: raw.A.time[0], T: (raw.A.time[raw.A.time.length - 1] - raw.A.time[0]) / 1000,
+        status: ev.length < 10 ? `只识别到 ${ev.length} 步，可能没在走动或少开了传感器` : '' });
+    } catch (err) { it.status = '读不了：' + (err.message || err); }
+    renderBG(); await new Promise(r => setTimeout(r, 0));
+  }
+  if (!BG.start && floor.bgStart) BG.start = { ...floor.bgStart };
+  if (!BG.start) { $('#bgMsg').textContent = '在地图上点起点，再点出发后先走的方向。'; setMode('bgStart'); }
+  else $('#bgMsg').textContent = '用的是上次设的起点。不对的话点“重新点起点”。';
+  renderBG(); draw();
 };
-$('#bgSetStart').onclick = () => { BG.start = null; $('#bgRun').disabled = true; $('#bgMsg').textContent = '在地图上点起点，再点出发后先走的方向。'; setMode('bgStart'); };
-$('#bgSetEnd').onclick = () => { $('#bgMsg').textContent = '在地图上点停止录制时站的位置。'; setMode('bgEnd'); };
+function bgReady() { return !!(BG.start && BG.start.face != null && BG.items.some(i => i.ev && i.ev.length >= 10)); }
+function renderBG() {
+  $('#bgCtl').hidden = !BG.items.length;
+  $('#bgInfo').innerHTML = BG.items.map(it => {
+    const st = it.status || ''; const cls = st.startsWith('已') ? 'ok' : (st.startsWith('读取') || st.startsWith('计算')) ? '' : 'bad';
+    return `<div class="card"><div class="row" style="margin:0"><label>名字 <input type="text" data-bgname="${it.id}" value="${esc(it.name)}" placeholder="谁录的" maxlength="20" style="width:8em"></label><button class="b" data-bgdel="${it.id}" style="min-height:28px;padding:2px 8px">移除</button></div>
+    <span class="mono" style="font-size:11.5px;color:var(--muted)">${esc(it.file)}${it.ev ? ` · ${ymd(it.t0)} ${hm(it.t0)} 起 · ${dur(it.T)} · ${it.ev.length} 步${it.ped ? '（手机计步 ' + it.ped + '）' : ''}` : ''}</span>
+    ${st ? `<br><span class="pill ${cls}">${esc(st)}</span>` : ''}${it.sessionId ? ` <button class="b" data-bgflip="${it.id}" style="min-height:28px;padding:2px 8px">看着左右反了？镜像重算</button>` : ''}</div>`;
+  }).join('');
+  $$('#bgInfo [data-bgname]').forEach(i => i.oninput = () => { BG.items.find(q => q.id === i.dataset.bgname).name = i.value.trim(); });
+  $$('#bgInfo [data-bgdel]').forEach(b => b.onclick = () => { BG.items = BG.items.filter(q => q.id !== b.dataset.bgdel); renderBG(); });
+  $$('#bgInfo [data-bgflip]').forEach(b => b.onclick = async () => { const it = BG.items.find(q => q.id === b.dataset.bgflip); it.forceSign = -(it.sign || 1); await bgGenerate([it]); switchTab('lib'); });
+  $('#bgRun').disabled = !bgReady();
+  $('#bgRun').textContent = BG.items.length > 1 ? `生成全部 ${BG.items.length} 条轨迹` : '生成轨迹';
+  $('#bgLoop').checked = BG.loop !== false;
+}
+$('#bgLoop').onchange = e => { BG.loop = e.target.checked; };
+$('#bgSetStart').onclick = () => { BG.start = null; $('#bgRun').disabled = true; $('#bgMsg').textContent = '在地图上点起点，再点出发后先走的方向。'; setMode('bgStart'); draw(); };
 function bgTap(x, y) {
-  if (mode === 'bgStart') {
-    if (!BG.start || BG.start.face != null) { if (isWallAt(x, y)) return toast('这里是墙'); BG.start = { x, y, face: null }; $('#bgMsg').textContent = '再点一下出发后先走的方向。'; }
-    else { BG.start.face = n360(deg(Math.atan2(x - BG.start.x, -(y - BG.start.y)))); $('#bgRun').disabled = false; $('#bgMsg').textContent = '可以生成了。知道终点的话点 ② 加上，会更准。'; setMode('view'); }
-  } else if (mode === 'bgEnd') { if (isWallAt(x, y)) return toast('这里是墙'); BG.end = { x, y }; $('#bgMsg').textContent = '终点已设。'; setMode('view'); }
+  if (!BG.start || BG.start.face != null) { if (isWallAt(x, y)) return toast('这里是墙'); BG.start = { x, y, face: null }; $('#bgMsg').textContent = '再点一下出发后先走的方向。'; }
+  else { BG.start.face = n360(deg(Math.atan2(x - BG.start.x, -(y - BG.start.y)))); floor.bgStart = { ...BG.start }; saveFloor(); $('#bgMsg').textContent = '起点已设，会记住，下次不用再点。'; setMode('view'); renderBG(); }
   draw();
 }
-$('#bgRun').onclick = async () => {
-  if (!BG.ev || !BG.start || BG.start.face == null) return;
-  $('#bgRun').disabled = true; $('#bgMsg').textContent = '计算中…'; await new Promise(r => setTimeout(r, 30));
-  const p = prof(); const stepLen = clamp(p.K * Math.pow(3.2, 0.25), 0.5, 0.95);
-  // detection in a pocket sometimes counts one peak per stride: use the phone's own pedometer to rescale
-  let len = stepLen; if (BG.raw.ped) { const r = BG.raw.ped / BG.ev.length; if (r > 1.6 && r < 2.4) len = stepLen * r; }
-  let best;
-  if ($('#bgFlip').dataset.auto !== 'off') {
-    const a = bgRunFilter(BG.ev, BG.start, BG.end, 1, len), b = bgRunFilter(BG.ev, BG.start, BG.end, -1, len);
-    const flip = b.kills + 0.02 < a.kills; $('#bgFlip').checked = flip; best = flip ? b : a;
-  } else best = bgRunFilter(BG.ev, BG.start, BG.end, $('#bgFlip').checked ? -1 : 1, len);
-  const t0 = best.path[0].t;
-  const s = { id: BG.sessionId || uid('s'), format: 'footfall-trace/v1', source: 'sensorlogger', sourceFile: BG.raw.name, floorId: floor.id, floorName: floor.name, participant: p.name, participantId: p.id, K: p.K, calibrated: !!p.calibrated,
-    sim: false, date: ymd(t0), startedAt: t0, endedAt: best.path.at(-1).t, offset: +best.offset.toFixed(1), steps: best.steps, path: best.path, anchors: best.anchors, gaps: [], recoveries: best.recoveries, device: BG.raw.device || BG.raw.platform, endReason: '后台记录导入' };
-  BG.sessionId = s.id; tracker.p = []; tracker.last = null;
-  await DB.put('sessions', s); libSel = new Set([s.id]); await loadSessions();
-  $('#bgRun').disabled = false;
-  $('#bgMsg').textContent = `已生成：${s.steps.length} 步，${pathLen(s).toFixed(0)} m` + (best.anchors[1] ? `，终点偏差 ${best.anchors[1].err} m（已按时间拉回）` : '') + '。在“记录库”里看。看着像镜像了就勾“左右镜像”再生成一次。';
-  switchTab('lib');
-};
-$('#bgFlip').onchange = () => { $('#bgFlip').dataset.auto = 'off'; };
+async function bgGenerate(items) {
+  $('#bgRun').disabled = true; const done = [];
+  for (const it of items) {
+    if (!it.ev || it.ev.length < 10) continue;
+    it.status = '计算中…'; renderBG(); await new Promise(r => setTimeout(r, 20));
+    // step length: the phone's own pedometer distance when it logged one, else a typical adult step
+    let len = 0.68; if (it.pedDist && it.ped) { const L = it.pedDist / it.ped; if (L > 0.4 && L < 1) len = L; }
+    if (it.ped) { const r = it.ped / it.ev.length; if (r > 1.6 && r < 2.4) len *= r; } // pocket: one detected peak per stride
+    const end = BG.loop !== false ? { x: BG.start.x, y: BG.start.y } : null;
+    let best;
+    if (it.forceSign) { best = bgRunFilter(it.ev, BG.start, end, it.forceSign, len); it.sign = it.forceSign; it.forceSign = 0; }
+    else { const a = bgRunFilter(it.ev, BG.start, end, 1, len), b = bgRunFilter(it.ev, BG.start, end, -1, len); const flip = b.kills + 0.02 < a.kills; best = flip ? b : a; it.sign = flip ? -1 : 1; }
+    const t0 = best.path[0].t; const who = it.name || '未命名';
+    const s = { id: it.sessionId || uid('s'), format: 'footfall-trace/v1', source: 'sensorlogger', sourceFile: it.file, floorId: floor.id, floorName: floor.name, participant: who, participantId: 'name:' + who, K: null, calibrated: !!it.pedDist,
+      sim: false, date: ymd(t0), startedAt: t0, endedAt: best.path[best.path.length - 1].t, offset: +best.offset.toFixed(1), steps: best.steps, path: best.path, anchors: best.anchors, gaps: [], recoveries: best.recoveries, device: it.device || it.platform, endReason: '后台记录导入' };
+    it.sessionId = s.id; await DB.put('sessions', s); done.push(s.id);
+    it.status = `已生成 ${pathLen(s).toFixed(0)} m` + (best.anchors[1] ? `，回到起点时偏差 ${best.anchors[1].err} m（已拉回）` : '');
+    renderBG();
+  }
+  tracker.p = []; tracker.last = null;
+  await loadSessions();
+  if (done.length) { libSel = new Set(done); renderLib(); $('#bgMsg').textContent = `生成了 ${done.length} 条。去“记录库”看，可以叠在一起看或者看热力图，再导出 CSV。`; }
+  renderBG();
+}
+$('#bgRun').onclick = () => { if (bgReady()) bgGenerate(BG.items); };
 
 /* ---------------- Calibration ---------------- */
 let calRun = null, testRun = null;
@@ -790,12 +812,19 @@ function renderLib() {
     for (const s of days[d]) {
       const len = pathLen(s), mins = ((s.endedAt || s.path.at(-1)?.t || s.startedAt) - s.startedAt) / 60000;
       h += `<label class="sess"><input type="checkbox" data-id="${s.id}" ${libSel.has(s.id) ? 'checked' : ''}><span class="sw" style="background:${sessColor(s)}"></span>
-        <span><b>${esc(s.participant)}</b>${s.sim ? ' <span class="pill">演示</span>' : ''}${s.source === 'sensorlogger' ? ' <span class="pill">后台</span>' : ''}${s.calibrated ? '' : ' <span class="pill warn">未校准</span>'}<br>
+        <span><b>${esc(s.participant)}</b> <button class="b" data-ren="${s.id}" style="min-height:22px;padding:0 6px;font-size:11px">改名</button>${s.sim ? ' <span class="pill">演示</span>' : ''}${s.source === 'sensorlogger' ? ' <span class="pill">后台</span>' : ''}${s.calibrated ? '' : ' <span class="pill warn">未校准</span>'}<br>
         <span class="meta">${hm(s.startedAt)}–${hm(s.endedAt || s.startedAt)} · ${mins.toFixed(0)} 分 · ${s.steps.length} 步 · ${len.toFixed(0)} m · 校正 ${Math.max(0, s.anchors.length - 1)} 次${s.anchors.length > 1 ? ' · 平均偏差 ' + avgErr(s) + ' m' : ''}</span></span></label>`;
     }
   }
   $('#libList').innerHTML = h;
   $$('#libList input[data-id]').forEach(c => c.onchange = () => { c.checked ? libSel.add(c.dataset.id) : libSel.delete(c.dataset.id); libChanged(); });
+  $$('#libList button[data-ren]').forEach(b => b.onclick = e => {
+    e.preventDefault(); const s = sessions.find(q => q.id === b.dataset.ren); const name = b.previousElementSibling;
+    const inp = document.createElement('input'); inp.type = 'text'; inp.value = s.participant; inp.maxLength = 20; inp.style.width = '8em';
+    const ok = document.createElement('button'); ok.className = 'b'; ok.textContent = '保存';
+    ok.onclick = async ev => { ev.preventDefault(); s.participant = inp.value.trim() || s.participant; s.participantId = 'name:' + s.participant; await DB.put('sessions', s); renderLib(); };
+    name.hidden = true; b.replaceWith(inp, ok); inp.focus();
+  });
   $$('#libList button[data-day]').forEach(b => b.onclick = e => { e.preventDefault(); mine.filter(s => s.date === b.dataset.day).forEach(s => libSel.add(s.id)); renderLib(); libChanged(); });
   libChanged(false);
 }
@@ -869,7 +898,7 @@ function setMode(m) {
   mode = m; scalePts = []; $('#scaleRow').hidden = true; brushCursor = null;
   const map = { scale: '#mScale', wall: '#mWall', erase: '#mErase', anchor: '#mAnchor', view: '#mPan' };
   Object.entries(map).forEach(([k, s]) => $(s).classList.toggle('on', k === m));
-  $('#modeChip').textContent = { scale: '比例尺：点两个已知距离的点', wall: '画墙：拖动涂抹 · 双指缩放', erase: '擦除：拖动涂掉误判的墙 · 双指缩放', anchor: '锚点：点空白处新建，点已有的选中', bgStart: '后台记录：点起点，再点出发方向', bgEnd: '后台记录：点终点' }[m] || '';
+  $('#modeChip').textContent = { scale: '比例尺：点两个已知距离的点', wall: '画墙：拖动涂抹 · 双指缩放', erase: '擦除：拖动涂掉误判的墙 · 双指缩放', anchor: '锚点：点空白处新建，点已有的选中', bgStart: '后台记录：点起点，再点出发方向' }[m] || '';
   draw();
 }
 $('#mScale').onclick = () => setMode(mode === 'scale' ? 'view' : 'scale');
